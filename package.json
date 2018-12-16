@@ -1,0 +1,21 @@
+{
+  "name": "dopees-chain-pug",
+  "version": "0.0.1",
+  "description": "dopees-chain-pug",
+  "main": "lib/pug.js",
+  "types": "lib/pug.d.ts",
+  "author": "",
+  "license": "MIT",
+  "flat": true,
+  "devDependencies": {
+    "@types/node": "10.12.12",
+    "@types/pug": "2.0.4",
+    "dopees-chain": "file://../dopees-chain",
+    "pug-code-gen": "2.0.1",
+    "pug-lexer": "4.0.0",
+    "pug-parser": "5.0.0",
+    "pug-runtime": "2.0.4",
+    "pug-walk": "1.1.7",
+    "typescript": "3.1.6"
+  }
+}
