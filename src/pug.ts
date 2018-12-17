@@ -1,5 +1,6 @@
-import { Executor, Task, Context, FileName, Helpers as h } from 'dopees-chain';
+import { Executor, Task, Context, FileName, Helpers as h, derived, Executors } from 'dopees-chain';
 import { promises as fsp } from 'fs';
+/// <reference types="../types/pug-parser.d.ts" />
 import * as parser from 'pug-parser';
 import * as lexer from 'pug-lexer';
 import * as codeGen from 'pug-code-gen';
@@ -8,6 +9,7 @@ import * as fspath from 'path';
 import * as fs from 'fs';
 import * as wrap from 'pug-runtime/wrap';
 import * as walk from 'pug-walk';
+
 
 interface AstCache {
   ast: parser.Node;
@@ -113,160 +115,109 @@ interface StringMap {
   [name: string]: string
 }
 
+interface PugMapperState extends derived.FileMapperState {
+  inlineCss?: boolean;
+}
+
+export class PugMapper extends derived.FileMapper<Options, parser.Node, PugMapperState> {
+  name = 'pug';
+  protected createSourceTask(_: PugMapperState, task: Task, sourcePath: string, context: Context): Task {
+    return Task.file(sourcePath, context.basePath, { targetPath: fspath.dirname((<FileName>task.name).path) });
+  }
+  protected generate(state: PugMapperState, task: Task, innerState: parser.Node, context: Context): Buffer | Promise<Buffer> {
+    const options : codeGen.Options = {
+      // ...sassOptions,
+      pretty: false,
+      // file: source,
+      // data: await context.getContents(scssTask, 'utf-8'),
+      // outFile: name.path,
+      // sourceMap: true
+    };
+    return Buffer.from(wrap(generateHtml(innerState, options))(), 'utf-8');
+  }
+  protected async readSource(state: PugMapperState, task: Task, context: Context) {
+    const contents = await context.getContents(task, 'utf-8');
+    return parsePug(contents, (<FileName>task.name).path);
+  }
+  protected init(options: Options): PugMapperState {
+    return {
+      inlineCss: options.inlineCss,
+      innerStateKey: 'pug.ast',
+      selector: (path: string) => path.endsWith('.html'),
+      sourceResolver: options.sourceResolver || ((path: string) => path.replace(/\.html$/, '.pug'))
+    };
+  }
+  protected async process(state: PugMapperState, task: Task, sourceTask: Task, innerState: parser.Node, context: Context) {
+    if (state.inlineCss !== false) {
+      const name = <FileName>task.name;
+      context.log(this.name, task, 'inlining css');
+      // pug task has been prcessed, so we are safe to use this...
+      const deps = (<{ deps: string[] }>(await context.storage.getObject<Dependencies>(`!pug.dependencies!${(<FileName>sourceTask.name).path}`))).deps;
+      const csss: StringMap = {};
+      await Promise.all(deps.map(async dep => {
+        if (dep.endsWith('.css')) {
+          const subtask = await context.execute(Task.file(dep, context.basePath));
+          csss[dep] = await context.getContents(subtask, 'utf-8');
+        }
+      }));
+      // TODO: better deep clone
+      const ast = JSON.parse(JSON.stringify(innerState));
+      walk(ast, (node, replace) => {
+        const href = getLinkHref(node);
+        if (href) {
+          const fullHref = fspath.normalize(fspath.join(fspath.dirname(name.path), href));
+          const contents = csss[fullHref];
+          if (contents) {
+            context.log('pug', task, `inlining ${href}`);
+            const replacement : parser.Tag = {
+              name: 'style',
+              attrs: <parser.Attribute[]>[],
+              attributeBlocks: [],
+              type: NodeType.Tag,
+              block: <parser.Block>{
+                type: NodeType.Block,
+                nodes: [<parser.Text>{
+                  type: NodeType.Text,
+                  val: contents
+                }]
+              }
+            };
+            replace(replacement);
+            return false;
+          }
+        }
+        return true;
+      });
+      context.log(this.name, task, 'inlining css done');
+      return ast;
+    }
+  }
+}
+
+export class PugDependencyResolver extends derived.FileDependencyResolver<Options, parser.Node, derived.FileDependencyResolverState & { inlineCss?: boolean, innerStateKey: string, dependenciesKey: string }> {
+  name = 'pug:deps';
+  protected async readSource(_: any, task: Task, context: Context) {
+    const contents = await context.getContents(task, 'utf-8');
+    return parsePug(contents, (<FileName>task.name).path);
+  }
+  protected readDependencies(_: any, task: Task, innerState: parser.Node, context: Context) {
+    const name = <FileName>task.name;
+    return collectDependencies(name.path, task.state.targetPath, innerState, [fspath.dirname(name.path), name.basePath || context.basePath])
+  }
+  protected init(options: Options): derived.FileDependencyResolverState & { inlineCss?: boolean, innerStateKey: string; dependenciesKey: string; } {
+    return {
+      inlineCss: options.inlineCss,
+      innerStateKey: 'pug.ast',
+      dependenciesKey: 'pug.dependencies',
+      selector: (path: string) => path.endsWith('.pug')
+    };
+  }
+}
+
 export function pug(options?: Options) {
   const opts = options || { };
-  return async (task: Task, context: Context) => {
-    const name = task.name;
-    if (name instanceof FileName) {
-      if (name.path.endsWith('.html')) {
-        const startTs = Date.now();
-        // [css <--- scss] case
-        let source: string;
-        if (opts.sourceResolver) {
-          source = opts.sourceResolver(name.path, name.basePath);
-        } else {
-          source = name.path.replace(/\.html$/, '.pug');
-        }
-        // FIXME: fix targetPath...
-        let pugTask = Task.file(source, name.basePath, { targetPath: fspath.dirname(name.path) });
-        context.log('pug', task, `resolved source => ${pugTask.name}`);
-        // execute dependency (.pug), possibly triggering subdependencies....
-        pugTask = await context.execute(pugTask);
-
-        // check if file already exists...
-        const mtime = await fsp.stat(name.path).then(stats => stats.mtime, () => null);
-        if (mtime) {
-          // check if source if older (no direct mtime as some dependency of the source could have changed instead of
-          // the source itself)...
-          const sourceMtime = await h.getMtime(pugTask, context);
-          if (sourceMtime && sourceMtime <= mtime) {
-            // no need to recompile html, linked resources may have changed though...
-            return;
-          }
-        }
-        const pugName = <FileName>pugTask.name;
-        // in all other cases ---> compile....
-        const options : codeGen.Options = {
-          // ...sassOptions,
-          pretty: false,
-          // file: source,
-          // data: await context.getContents(scssTask, 'utf-8'),
-          // outFile: name.path,
-          // sourceMap: true
-        };
-        const contents = await context.getContents(pugTask, 'utf-8');
-        // NOTE: ast mtime?
-        let ast : parser.Node;
-        {
-          const cached = await context.storage.getObject<AstCache>(`!pug.ast!${pugName.path}`);
-          if (cached) {
-            context.log('pug', task, 'using cached AST');
-            ast = cached.ast;
-          } else {
-            context.log('pug', task, 'parsing pug...');
-            ast = parsePug(contents, source);
-            context.log('pug', task, 'done parsing pug');
-          }
-        }
-        if (false !== opts.inlineCss) {
-          context.log('pug', task, 'inlining css');
-          // pug task has been prcessed, so we are safe to use this...
-          const deps = (<Dependencies>(await context.storage.getObject<Dependencies>(`!pug.deps!${pugName.path}`))).deps;
-          const csss: StringMap = {};
-          await Promise.all(deps.map(async dep => {
-            if (dep.endsWith('.css')) {
-              const subtask = await context.execute(Task.file(dep, context.basePath));
-              csss[dep] = await context.getContents(subtask, 'utf-8');
-            }
-          }));
-          // TODO: better deep clone
-          ast = JSON.parse(JSON.stringify(ast));
-          walk(ast, (node, replace) => {
-            const href = getLinkHref(node);
-            if (href) {
-              const fullHref = fspath.normalize(fspath.join(fspath.dirname(name.path), href));
-              const contents = csss[fullHref];
-              if (contents) {
-                context.log('pug', task, `inlining ${href}`);
-                const replacement : parser.Tag = {
-                  name: 'style',
-                  attrs: <parser.Attribute[]>[],
-                  attributeBlocks: [],
-                  type: NodeType.Tag,
-                  block: <parser.Block>{
-                    type: NodeType.Block,
-                    nodes: [<parser.Text>{
-                      type: NodeType.Text,
-                      val: contents
-                    }]
-                  }
-                };
-                replace(replacement);
-                return false;
-              }
-            }
-            return true;
-          });
-          context.log('pug', task, 'inlining css done');
-        }
-        const htmlContents = wrap(generateHtml(ast, options));
-        context.log('pug', task, 'storing html');
-        const res = await context.saveContents(task, Buffer.from(htmlContents(), 'utf-8'), true);
-        context.log('pug', task, 'done', Date.now() - startTs);
-        return res;
-      } else if (name.path.endsWith('.pug')) {
-        // [pug <--- pug dependencies] case
-        const startTs = Date.now();
-        context.log('pug:dep', task, 'starting...');
-        let mtime: Date;
-        try {
-          const stats = await fsp.stat(name.path);
-          mtime = stats.mtime;
-        } catch (e) {
-          throw new Error(`file not found: ${name.path}`);
-        }
-        let deps: string[];
-        let ast: parser.Node | null = null;
-        const entry = await context.storage.getObject<Dependencies>(`!pug.deps!${name.path}`);
-        if (entry && entry.mtime <= mtime) {
-          // dependencies did not change
-          context.log('pug:dep', task, 'using cached dependencies');
-          deps = entry.deps;
-        } else {
-          context.log('pug:dep', task, 'resolving dependencies...');
-          const data = await context.getContents(task);
-          const contents = data.toString('utf-8');
-          context.log('pug:dep', task, 'parsing pug...');
-          ast = parsePug(contents, name.path);
-          context.log('pug:dep', task, 'done parsing pug');
-          // FIXME: fix targetPath...
-          deps = collectDependencies(name.path, task.state.targetPath, ast, [fspath.dirname(name.path), name.basePath || context.basePath]);
-        }
-        if (deps.length) {
-          const depTasks = deps.map(dep => Task.file(dep, name.basePath));
-          context.log('pug:dep', task, `done resolving dependencies => ${depTasks.map(t => t.name).join(', ')}`);
-          const mtimes = [mtime];
-          await Promise.all(depTasks.map(async t => {
-            const depTask = await context.execute(t);
-            mtimes.push(await h.getMtime(depTask, context) || mtime);
-          }))
-          const mtimeMilliseconds = Math.max.apply(Math, mtimes.map(date => date.getTime()));
-          mtime = new Date();
-          mtime.setTime(mtimeMilliseconds);
-        } else {
-          context.log('pug:dep', task, 'done resolving dependencies => none');
-        }
-        // cache ast
-        if (ast) {
-          const astCache : AstCache = { mtime, ast }
-          await context.storage.setObject(`!pug.ast!${name.path}`, astCache);
-        }
-        // cache dependencies
-        await context.storage.setObject(`!pug.deps!${name.path}`, { mtime, deps });
-        const final = await h.setMtime(task, mtime, context);
-        context.log('pug:dep', task, 'done', Date.now() - startTs);
-        return final;
-      }
-    }
-  };
+  return Executors.combine(
+    new PugMapper().createExecutor(opts),
+    new PugDependencyResolver().createExecutor(opts)
+  );
 }
