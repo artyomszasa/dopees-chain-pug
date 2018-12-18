@@ -1,6 +1,4 @@
-import { Executor, Task, Context, FileName, Helpers as h, derived, Executors } from 'dopees-chain';
-import { promises as fsp } from 'fs';
-/// <reference types="../types/pug-parser.d.ts" />
+import { Task, Context, FileName, Helpers as h, derived, Executors, PathResolver, ReversePathResolver } from 'dopees-chain';
 import * as parser from 'pug-parser';
 import * as lexer from 'pug-lexer';
 import * as codeGen from 'pug-code-gen';
@@ -9,14 +7,6 @@ import * as fspath from 'path';
 import * as fs from 'fs';
 import * as wrap from 'pug-runtime/wrap';
 import * as walk from 'pug-walk';
-
-
-interface AstCache {
-  ast: parser.Node;
-  mtime: Date
-}
-
-const ah = ast;
 
 const fileExistsSync = (path: string) => {
   try {
@@ -102,6 +92,10 @@ const collectDependencies = (path: string, targetPath: string, node: parser.Node
 }
 
 export interface Options {
+  targetRoot: string;
+  subfolders?: boolean;
+  sourceRoot?: string
+  targetExt?: string;
   sourceResolver?: (path: string, basePath?: string) => string;
   inlineCss?: boolean;
 }
@@ -119,12 +113,22 @@ interface PugMapperState extends derived.FileMapperState {
   inlineCss?: boolean;
 }
 
-export class PugMapper extends derived.FileMapper<Options, parser.Node, PugMapperState> {
+// NOTE: to avoid non-standard dependencies from pug libraries, inner state is opaque object.
+export interface PugMapperAst {
+  /** boxed pug ast */
+  boxedAst: any
+}
+
+function box(ast: parser.Node): PugMapperAst { return { boxedAst: <any>ast }; }
+function unbox(box: PugMapperAst) { return <parser.Node>box.boxedAst; }
+
+
+export class PugMapper extends derived.FileMapper<Options, PugMapperAst, PugMapperState> {
   name = 'pug';
   protected createSourceTask(_: PugMapperState, task: Task, sourcePath: string, context: Context): Task {
     return Task.file(sourcePath, context.basePath, { targetPath: fspath.dirname((<FileName>task.name).path) });
   }
-  protected generate(state: PugMapperState, task: Task, innerState: parser.Node, context: Context): Buffer | Promise<Buffer> {
+  protected generate(state: PugMapperState, task: Task, innerState: PugMapperAst, context: Context): Buffer | Promise<Buffer> {
     const options : codeGen.Options = {
       // ...sassOptions,
       pretty: false,
@@ -133,21 +137,38 @@ export class PugMapper extends derived.FileMapper<Options, parser.Node, PugMappe
       // outFile: name.path,
       // sourceMap: true
     };
-    return Buffer.from(wrap(generateHtml(innerState, options))(), 'utf-8');
+    return Buffer.from(wrap(generateHtml(unbox(innerState) , options))(), 'utf-8');
   }
   protected async readSource(state: PugMapperState, task: Task, context: Context) {
     const contents = await context.getContents(task, 'utf-8');
-    return parsePug(contents, (<FileName>task.name).path);
+    return box(parsePug(contents, (<FileName>task.name).path));
   }
   protected init(options: Options): PugMapperState {
+    const extension = `.${options.targetExt || 'html'}`;
+    let sourceResolver: PathResolver;
+    if (options.sourceResolver) {
+      sourceResolver = options.sourceResolver;
+    } else if (options.sourceRoot) {
+      sourceResolver = ReversePathResolver.from({
+        sourceRoot: options.sourceRoot,
+        targetRoot: options.targetRoot,
+        sourceExt: 'pug',
+        targetExt: 'html'
+      });
+    } else {
+      sourceResolver = ((path: string) => path.replace(/\.html$/, '.pug'));
+    }
     return {
       inlineCss: options.inlineCss,
       innerStateKey: 'pug.ast',
-      selector: (path: string) => path.endsWith('.html'),
-      sourceResolver: options.sourceResolver || ((path: string) => path.replace(/\.html$/, '.pug'))
+      selector: (path: string, context: Context) => {
+        const absoluteTargetRoot = fspath.normalize(fspath.join(context.basePath, options.targetRoot));
+        return path.endsWith(extension) && PathResolver.match(path, absoluteTargetRoot, options.subfolders);
+      },
+      sourceResolver: sourceResolver
     };
   }
-  protected async process(state: PugMapperState, task: Task, sourceTask: Task, innerState: parser.Node, context: Context) {
+  protected async process(state: PugMapperState, task: Task, sourceTask: Task, innerState: PugMapperAst, context: Context): Promise<PugMapperAst> {
     if (state.inlineCss !== false) {
       const name = <FileName>task.name;
       context.log(this.name, task, 'inlining css');
@@ -161,7 +182,7 @@ export class PugMapper extends derived.FileMapper<Options, parser.Node, PugMappe
         }
       }));
       // TODO: better deep clone
-      const ast = JSON.parse(JSON.stringify(innerState));
+      const ast = <parser.Node>JSON.parse(JSON.stringify(unbox(innerState)));
       walk(ast, (node, replace) => {
         const href = getLinkHref(node);
         if (href) {
@@ -189,20 +210,21 @@ export class PugMapper extends derived.FileMapper<Options, parser.Node, PugMappe
         return true;
       });
       context.log(this.name, task, 'inlining css done');
-      return ast;
+      return box(ast);
     }
+    return innerState;
   }
 }
 
-export class PugDependencyResolver extends derived.FileDependencyResolver<Options, parser.Node, derived.FileDependencyResolverState & { inlineCss?: boolean, innerStateKey: string, dependenciesKey: string }> {
+export class PugDependencyResolver extends derived.FileDependencyResolver<Options, PugMapperAst, derived.FileDependencyResolverState & { inlineCss?: boolean, innerStateKey: string, dependenciesKey: string }> {
   name = 'pug:deps';
   protected async readSource(_: any, task: Task, context: Context) {
     const contents = await context.getContents(task, 'utf-8');
-    return parsePug(contents, (<FileName>task.name).path);
+    return box(parsePug(contents, (<FileName>task.name).path));
   }
-  protected readDependencies(_: any, task: Task, innerState: parser.Node, context: Context) {
+  protected readDependencies(_: any, task: Task, innerState: PugMapperAst, context: Context) {
     const name = <FileName>task.name;
-    return collectDependencies(name.path, task.state.targetPath, innerState, [fspath.dirname(name.path), name.basePath || context.basePath])
+    return collectDependencies(name.path, task.state.targetPath, unbox(innerState), [fspath.dirname(name.path), name.basePath || context.basePath])
   }
   protected init(options: Options): derived.FileDependencyResolverState & { inlineCss?: boolean, innerStateKey: string; dependenciesKey: string; } {
     return {
@@ -215,9 +237,11 @@ export class PugDependencyResolver extends derived.FileDependencyResolver<Option
 }
 
 export function pug(options?: Options) {
-  const opts = options || { };
+  if (!options) {
+    throw new Error('targetRoot must be defined.');
+  }
   return Executors.combine(
-    new PugMapper().createExecutor(opts),
-    new PugDependencyResolver().createExecutor(opts)
+    new PugMapper().createExecutor(options),
+    new PugDependencyResolver().createExecutor(options)
   );
 }

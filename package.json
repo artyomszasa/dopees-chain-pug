@@ -10,7 +10,7 @@
   "devDependencies": {
     "@types/node": "10.12.12",
     "@types/pug": "2.0.4",
-    "dopees-chain": "file://../dopees-chain",
+    "dopees-chain": "artyomszasa/dopees-chain",
     "pug-code-gen": "2.0.1",
     "pug-lexer": "4.0.0",
     "pug-parser": "5.0.0",
