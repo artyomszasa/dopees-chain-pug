@@ -8,6 +8,7 @@
   "license": "MIT",
   "flat": true,
   "dependencies": {
+    "dopees-chain": "artyomszasa/dopees-chain#master",
     "pug-code-gen": "2.0.1",
     "pug-lexer": "4.0.0",
     "pug-parser": "5.0.0",
@@ -15,7 +16,6 @@
     "pug-walk": "1.1.7"
   },
   "devDependencies": {
-    "dopees-chain": "artyomszasa/dopees-chain",
     "@types/node": "10.12.12",
     "@types/pug": "2.0.4",
     "typescript": "3.1.6"
