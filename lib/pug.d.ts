@@ -1,5 +1,8 @@
 /// <reference types="node" />
 import { Task, Context, derived } from 'dopees-chain';
+export interface PugLocals {
+    [key: string]: any;
+}
 export interface Options {
     targetRoot: string;
     subfolders?: boolean;
@@ -7,9 +10,11 @@ export interface Options {
     targetExt?: string;
     sourceResolver?: (path: string, basePath?: string) => string;
     inlineCss?: boolean;
+    locals?: PugLocals | ((path: string) => PugLocals | undefined);
 }
 interface PugMapperState extends derived.FileMapperState {
     inlineCss?: boolean;
+    locals?: PugLocals | ((path: string) => PugLocals | undefined);
 }
 export interface PugMapperAst {
     /** boxed pug ast */
@@ -37,5 +42,5 @@ export declare class PugDependencyResolver extends derived.FileDependencyResolve
         dependenciesKey: string;
     };
 }
-export declare function pug(options?: Options): import("dopees-chain/lib/task").Executor;
+export declare function pug(options?: Options): import("dopees-chain").Executor;
 export {};

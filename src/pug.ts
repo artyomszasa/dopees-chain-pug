@@ -91,6 +91,10 @@ const collectDependencies = (path: string, targetPath: string, node: parser.Node
   return deps;
 }
 
+export interface PugLocals {
+  [key: string]: any
+}
+
 export interface Options {
   targetRoot: string;
   subfolders?: boolean;
@@ -98,6 +102,7 @@ export interface Options {
   targetExt?: string;
   sourceResolver?: (path: string, basePath?: string) => string;
   inlineCss?: boolean;
+  locals?: PugLocals|((path: string) => PugLocals|undefined);
 }
 
 interface Dependencies {
@@ -109,8 +114,10 @@ interface StringMap {
   [name: string]: string
 }
 
+
 interface PugMapperState extends derived.FileMapperState {
   inlineCss?: boolean;
+  locals?: PugLocals|((path: string) => PugLocals|undefined);
 }
 
 // NOTE: to avoid non-standard dependencies from pug libraries, inner state is opaque object.
@@ -129,15 +136,26 @@ export class PugMapper extends derived.FileMapper<Options, PugMapperAst, PugMapp
     return Task.file(sourcePath, context.basePath, { targetPath: fspath.dirname((<FileName>task.name).path) });
   }
   protected generate(state: PugMapperState, task: Task, innerState: PugMapperAst, context: Context): Buffer | Promise<Buffer> {
+    let locals: PugLocals|undefined;
+    if (state.locals) {
+      if ('object' === typeof state.locals) {
+        locals = state.locals;
+      } else {
+        locals = state.locals(task.name instanceof FileName ? task.name.path : task.name.name);
+      }
+    } else {
+      locals = undefined;
+    }
     const options : codeGen.Options = {
       // ...sassOptions,
       pretty: false,
+
       // file: source,
       // data: await context.getContents(scssTask, 'utf-8'),
       // outFile: name.path,
       // sourceMap: true
     };
-    return Buffer.from(wrap(generateHtml(unbox(innerState) , options))(), 'utf-8');
+    return Buffer.from(wrap(generateHtml(unbox(innerState) , options))(locals), 'utf-8');
   }
   protected async readSource(state: PugMapperState, task: Task, context: Context) {
     const contents = await context.getContents(task, 'utf-8');
@@ -165,7 +183,8 @@ export class PugMapper extends derived.FileMapper<Options, PugMapperAst, PugMapp
         const absoluteTargetRoot = fspath.normalize(fspath.join(context.basePath, options.targetRoot));
         return path.endsWith(extension) && PathResolver.match(path, absoluteTargetRoot, options.subfolders);
       },
-      sourceResolver: sourceResolver
+      sourceResolver: sourceResolver,
+      locals: options.locals
     };
   }
   protected async process(state: PugMapperState, task: Task, sourceTask: Task, innerState: PugMapperAst, context: Context): Promise<PugMapperAst> {
