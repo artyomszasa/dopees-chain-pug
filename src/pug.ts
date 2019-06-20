@@ -82,8 +82,8 @@ const collectDependencies = (path: string, targetPath: string, node: parser.Node
     if (href) {
       deps.push(fspath.normalize(fspath.join(targetPath, href)));
       return false;
-    } else if (ast.isInclude(n) && n.file && n.file.filename) {
-      deps.push(resolveDependency(n.file.filename, includePaths, rootPath));
+    } else if (ast.isInclude(n) && n.file && n.file.path) {
+      deps.push(resolveDependency(n.file.path, includePaths, rootPath));
       return false;
     }
     return true;
