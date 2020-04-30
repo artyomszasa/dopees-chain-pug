@@ -11,6 +11,7 @@
     "dopees-chain": "artyomszasa/dopees-chain#master",
     "pug-code-gen": "2.0.1",
     "pug-lexer": "4.0.0",
+    "pug-linker": "3.0.6",
     "pug-parser": "5.0.0",
     "pug-runtime": "2.0.4",
     "pug-walk": "1.1.7"

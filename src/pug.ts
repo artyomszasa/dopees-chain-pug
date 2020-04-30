@@ -1,6 +1,7 @@
 import { Task, Context, FileName, Helpers as h, derived, Executors, PathResolver, ReversePathResolver } from 'dopees-chain';
 import * as parser from 'pug-parser';
 import * as lexer from 'pug-lexer';
+import * as linker from 'pug-linker';
 import * as codeGen from 'pug-code-gen';
 import { default as ast, NodeType } from './ast-helpers';
 import * as fspath from 'path';
@@ -23,7 +24,7 @@ const parsePug = (contents: string, path: string) => {
 }
 
 const generateHtml = (ast: parser.Node, options?: codeGen.Options) => {
-  return codeGen(ast, options || {});
+  return codeGen(linker.link(ast), options || {});
 }
 
 const resolveDependency = (path: string, includePaths: string[], rootPath: string) => {
